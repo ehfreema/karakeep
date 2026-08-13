@@ -36,8 +36,13 @@ export function ThemeProvider({ children, ...props }: ThemeProviderProps) {
         "128": `logo-128${iconSuffix}`,
       };
       chrome.action.setIcon({ path: iconPaths });
-      // Notify background to keep context-menu icons in sync (mirrors toolbar's theme_icons behavior
-      // so the right-click menu icon stays visible on dark backgrounds).
+      // Persist effective theme for background (service worker has no reliable matchMedia when popup closed)
+      // and notify background to keep context-menu icons in sync so right-click menu inverts like toolbar.
+      chrome.storage.local
+        .set({ effectiveIsDark: useDarkModeIcons })
+        .catch(() => {
+          // ignore
+        });
       chrome.runtime
         .sendMessage({
           type: "KARAKEEP_THEME_UPDATE",

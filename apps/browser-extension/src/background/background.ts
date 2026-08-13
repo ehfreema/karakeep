@@ -25,10 +25,8 @@ function getIconSuffix(isDark: boolean): string {
   return isDark ? "-darkmode.png" : ".png";
 }
 
-function resolveIsDark(settings: Settings): boolean {
-  if (settings.theme === "dark") return true;
-  if (settings.theme === "light") return false;
-  // system - try to respect OS preference when possible (service workers may not have matchMedia)
+async function getSystemIsDark(): Promise<boolean> {
+  // 1. Service worker matchMedia (works in some browsers)
   try {
     if (typeof self !== "undefined" && "matchMedia" in self) {
       return (self as unknown as Window).matchMedia(
@@ -41,11 +39,44 @@ function resolveIsDark(settings: Settings): boolean {
   } catch {
     // ignore
   }
+  // 2. Query active tab's matchMedia (reflects OS theme, works even when popup closed)
+  try {
+    const [tab] = await chrome.tabs.query({
+      active: true,
+      currentWindow: true,
+    });
+    if (tab?.id) {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => window.matchMedia("(prefers-color-scheme: dark)").matches,
+      });
+      if (results?.[0]?.result !== undefined) {
+        return results[0].result as boolean;
+      }
+    }
+  } catch {
+    // likely missing host permission or no tab — fall through
+  }
+  // 3. Last effective theme stored by ThemeProvider (popup)
+  try {
+    const stored = await chrome.storage.local.get("effectiveIsDark");
+    if (typeof stored.effectiveIsDark === "boolean") {
+      return stored.effectiveIsDark;
+    }
+  } catch {
+    // ignore
+  }
   return false;
 }
 
+async function resolveIsDark(settings: Settings): Promise<boolean> {
+  if (settings.theme === "dark") return true;
+  if (settings.theme === "light") return false;
+  return await getSystemIsDark();
+}
+
 async function updateActionIcon(settings: Settings): Promise<boolean> {
-  const isDark = resolveIsDark(settings);
+  const isDark = await resolveIsDark(settings);
   const suffix = getIconSuffix(isDark);
   const iconPaths = {
     "16": `logo-16${suffix}`,
@@ -56,6 +87,12 @@ async function updateActionIcon(settings: Settings): Promise<boolean> {
     await chrome.action.setIcon({ path: iconPaths });
   } catch (e) {
     console.warn("Failed to set action icon:", e);
+  }
+  // Persist for other contexts and for getSystemIsDark fallback
+  try {
+    await chrome.storage.local.set({ effectiveIsDark: isDark });
+  } catch {
+    // ignore
   }
   return isDark;
 }
@@ -68,7 +105,7 @@ async function checkSettingsState(settings: Settings) {
   await initializeClients();
   await updateActionIcon(settings);
   if (settings?.address && settings?.apiKey) {
-    registerContextMenus(settings);
+    await registerContextMenus(settings);
   } else {
     removeContextMenus();
     await clearAllCache();
@@ -154,9 +191,12 @@ function createContextMenu(
   }
 }
 
-function registerContextMenus(settings: Settings, overrideIsDark?: boolean) {
+async function registerContextMenus(
+  settings: Settings,
+  overrideIsDark?: boolean,
+) {
   removeContextMenus();
-  const isDark = overrideIsDark ?? resolveIsDark(settings);
+  const isDark = overrideIsDark ?? (await resolveIsDark(settings));
   const suffix = getIconSuffix(isDark);
   // Firefox supports `icons` for contextMenus (Chrome fails if present). Provide theme-aware
   // icons only there so the menu icon stays visible on dark backgrounds, mirroring toolbar theme_icons.
@@ -377,13 +417,48 @@ async function clearAllCache() {
   }
 }
 
+let lastResolvedIsDark: boolean | null = null;
+
+async function maybeUpdateSystemTheme(): Promise<void> {
+  try {
+    const settings = await getPluginSettings();
+    if (settings.theme !== "system") return;
+    const currentIsDark = await getSystemIsDark();
+    if (lastResolvedIsDark !== null && currentIsDark === lastResolvedIsDark)
+      return;
+    lastResolvedIsDark = currentIsDark;
+    await updateActionIcon(settings);
+    await registerContextMenus(settings, currentIsDark);
+  } catch (e) {
+    console.warn("maybeUpdateSystemTheme failed:", e);
+  }
+}
+
 getPluginSettings().then(async (settings: Settings) => {
   await checkSettingsState(settings);
+  // Initialize lastResolvedIsDark for system polling
+  try {
+    lastResolvedIsDark = await resolveIsDark(settings);
+  } catch {
+    // ignore
+  }
 });
 
 subscribeToSettingsChanges(async (settings) => {
   await checkSettingsState(settings);
+  try {
+    lastResolvedIsDark = await resolveIsDark(settings);
+  } catch {
+    // ignore
+  }
 });
+
+// Poll for OS theme changes when popup is closed (manifest theme_icons handles toolbar,
+// but Firefox page-menu `icons` need explicit update; Chrome menu follows action icon
+// which we now also keep explicit for consistency).
+setInterval(() => {
+  void maybeUpdateSystemTheme();
+}, 2000);
 
 // eslint-disable-next-line @typescript-eslint/no-misused-promises -- Manifest V3 allows async functions for all callbacks
 chrome.contextMenus.onClicked.addListener(handleContextMenuClick);
@@ -463,11 +538,40 @@ async function checkAndUpdateIcon(tabId: number) {
 
 chrome.tabs.onActivated.addListener(async (tabActiveInfo) => {
   await checkAndUpdateIcon(tabActiveInfo.tabId);
+  void maybeUpdateSystemTheme();
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId) => {
   await checkAndUpdateIcon(tabId);
+  void maybeUpdateSystemTheme();
 });
+
+// Firefox: update menu just before it shows, so OS theme change is reflected immediately
+// even if popup has been closed and polling hasn't fired yet.
+try {
+  const menusApi = (
+    globalThis as unknown as {
+      browser?: {
+        menus?: { onShown?: { addListener: (cb: () => void) => void } };
+        contextMenus?: { onShown?: { addListener: (cb: () => void) => void } };
+      };
+    }
+  ).browser;
+  const onShown =
+    menusApi?.menus?.onShown ??
+    (
+      chrome.contextMenus as unknown as {
+        onShown?: { addListener: (cb: () => void) => void };
+      }
+    ).onShown;
+  if (onShown) {
+    onShown.addListener(() => {
+      void maybeUpdateSystemTheme();
+    });
+  }
+} catch {
+  // ignore — onShown not available in Chrome
+}
 
 // Listen for messages from popup (badge refresh + theme updates)
 chrome.runtime.onMessage.addListener(async (msg) => {
@@ -479,6 +583,12 @@ chrome.runtime.onMessage.addListener(async (msg) => {
       // ThemeProvider resolved the effective theme (including system). Mirror it to
       // action icon and context menus so the right-click menu icon inverts like the toolbar's theme_icons.
       const isDark: boolean = msg.isDark;
+      lastResolvedIsDark = isDark;
+      try {
+        await chrome.storage.local.set({ effectiveIsDark: isDark });
+      } catch {
+        // ignore
+      }
       const suffix = getIconSuffix(isDark);
       const iconPaths = {
         "16": `logo-16${suffix}`,
@@ -493,7 +603,7 @@ chrome.runtime.onMessage.addListener(async (msg) => {
       try {
         const settings = await getPluginSettings();
         if (settings?.address && settings?.apiKey) {
-          registerContextMenus(settings, isDark);
+          await registerContextMenus(settings, isDark);
         }
       } catch (e) {
         console.warn("Failed to update context menus from theme update:", e);
