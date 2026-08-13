@@ -44,7 +44,7 @@
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"
   },
-  "permissions": ["storage", "tabs", "contextMenus", "activeTab", "scripting"],
+  "permissions": ["storage", "tabs", "contextMenus", "activeTab", "scripting", "offscreen"],
   "optional_host_permissions": ["<all_urls>"],
   "content_scripts": [
     {

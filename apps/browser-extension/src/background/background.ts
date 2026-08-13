@@ -75,6 +75,36 @@ async function resolveIsDark(settings: Settings): Promise<boolean> {
   return await getSystemIsDark();
 }
 
+async function ensureOffscreenForSystemTheme(
+  settings: Settings,
+): Promise<void> {
+  // Offscreen document gives us a reliable window.matchMedia even when popup is closed.
+  // Only needed for `system` theme and only on Chrome (Firefox has no offscreen API but also has window in background).
+  if (settings.theme !== "system") return;
+  try {
+    const offscreen = (
+      chrome as unknown as {
+        offscreen?: {
+          hasDocument?: () => Promise<boolean>;
+          createDocument?: (opts: unknown) => Promise<void>;
+        };
+      }
+    ).offscreen;
+    if (!offscreen?.hasDocument || !offscreen?.createDocument) return;
+    const hasDoc = await offscreen.hasDocument();
+    if (!hasDoc) {
+      await offscreen.createDocument({
+        url: "offscreen.html",
+        reasons: ["MATCH_MEDIA" as unknown as string],
+        justification:
+          "Keep extension and context-menu icons in sync with browser theme",
+      });
+    }
+  } catch (e) {
+    console.warn("Failed to ensure offscreen document:", e);
+  }
+}
+
 async function updateActionIcon(settings: Settings): Promise<boolean> {
   const isDark = await resolveIsDark(settings);
   const suffix = getIconSuffix(isDark);
@@ -103,6 +133,7 @@ async function updateActionIcon(settings: Settings): Promise<boolean> {
  */
 async function checkSettingsState(settings: Settings) {
   await initializeClients();
+  await ensureOffscreenForSystemTheme(settings);
   await updateActionIcon(settings);
   if (settings?.address && settings?.apiKey) {
     await registerContextMenus(settings);
