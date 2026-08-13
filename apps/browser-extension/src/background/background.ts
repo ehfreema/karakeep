@@ -164,26 +164,6 @@ function removeContextMenus() {
  *   When provided, it is used instead of recomputing from settings, ensuring the right-click
  *   menu icon inverts exactly like the toolbar's theme_icons logic.
  */
-function isFirefoxEnvironment(): boolean {
-  try {
-    // Firefox exposes `browser` global; Chrome does not. Also check UA as fallback.
-    if (
-      typeof (globalThis as unknown as { browser?: unknown }).browser !==
-      "undefined"
-    ) {
-      return true;
-    }
-    if (
-      typeof navigator !== "undefined" &&
-      navigator.userAgent.includes("Firefox")
-    ) {
-      return true;
-    }
-  } catch {
-    // ignore
-  }
-  return false;
-}
 
 function createContextMenu(
   props: chrome.contextMenus.CreateProperties,
@@ -192,8 +172,10 @@ function createContextMenu(
   const finalProps: chrome.contextMenus.CreateProperties & {
     icons?: Record<string, string>;
   } = { ...props };
-  // Only Firefox supports `icons` — passing it on Chrome makes create fail and wipes the menu.
-  if (menuIcons && isFirefoxEnvironment()) {
+  // Try theme-aware `icons` on both browsers — Firefox officially supports it for sub-menus/top-level,
+  // Chrome now also shows it for page/action menus if provided (otherwise it falls back to manifest `icons` which is always dark).
+  // If the browser rejects it, we fallback to without icons.
+  if (menuIcons) {
     finalProps.icons = menuIcons;
   }
   try {
@@ -229,14 +211,11 @@ async function registerContextMenus(
   removeContextMenus();
   const isDark = overrideIsDark ?? (await resolveIsDark(settings));
   const suffix = getIconSuffix(isDark);
-  // Firefox supports `icons` for contextMenus (Chrome fails if present). Provide theme-aware
-  // icons only there so the menu icon stays visible on dark backgrounds, mirroring toolbar theme_icons.
-  const menuIcons: Record<string, string> | undefined = isFirefoxEnvironment()
-    ? {
-        "16": `logo-16${suffix}`,
-        "48": `logo-48${suffix}`,
-      }
-    : undefined;
+  // Provide theme-aware `icons` for both browsers so page-menu icon (which otherwise uses static manifest `icons` dark) inverts like toolbar.
+  const menuIcons: Record<string, string> = {
+    "16": `logo-16${suffix}`,
+    "48": `logo-48${suffix}`,
+  };
 
   createContextMenu(
     {
