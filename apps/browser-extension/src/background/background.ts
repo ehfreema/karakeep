@@ -21,12 +21,52 @@ const CLEAR_ALL_CACHE_ID = "clear-all-cache";
 const SEPARATOR_ID = "separator-1";
 const VIEW_PAGE_IN_KARAKEEP = "view-page-in-karakeep";
 
+function getIconSuffix(isDark: boolean): string {
+  return isDark ? "-darkmode.png" : ".png";
+}
+
+function resolveIsDark(settings: Settings): boolean {
+  if (settings.theme === "dark") return true;
+  if (settings.theme === "light") return false;
+  // system - try to respect OS preference when possible (service workers may not have matchMedia)
+  try {
+    if (typeof self !== "undefined" && "matchMedia" in self) {
+      return (self as unknown as Window).matchMedia(
+        "(prefers-color-scheme: dark)",
+      ).matches;
+    }
+    if (typeof matchMedia !== "undefined") {
+      return matchMedia("(prefers-color-scheme: dark)").matches;
+    }
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
+async function updateActionIcon(settings: Settings): Promise<boolean> {
+  const isDark = resolveIsDark(settings);
+  const suffix = getIconSuffix(isDark);
+  const iconPaths = {
+    "16": `logo-16${suffix}`,
+    "48": `logo-48${suffix}`,
+    "128": `logo-128${suffix}`,
+  };
+  try {
+    await chrome.action.setIcon({ path: iconPaths });
+  } catch (e) {
+    console.warn("Failed to set action icon:", e);
+  }
+  return isDark;
+}
+
 /**
  * Check the current settings state and register or remove context menus accordingly.
  * @param settings The current plugin settings.
  */
 async function checkSettingsState(settings: Settings) {
   await initializeClients();
+  await updateActionIcon(settings);
   if (settings?.address && settings?.apiKey) {
     registerContextMenus(settings);
   } else {
@@ -52,19 +92,35 @@ function removeContextMenus() {
  * * * If the "show count badge" setting is enabled, add context menu buttons to clear the cache for the current page or all pages.
  * * A context menu button to add a link to karakeep without loading the page.
  * @param settings The current plugin settings.
+ * @param overrideIsDark Optional explicit dark-mode flag (from ThemeProvider's resolved theme).
+ *   When provided, it is used instead of recomputing from settings, ensuring the right-click
+ *   menu icon inverts exactly like the toolbar's theme_icons logic.
  */
-function registerContextMenus(settings: Settings) {
+function registerContextMenus(settings: Settings, overrideIsDark?: boolean) {
   removeContextMenus();
+  const isDark = overrideIsDark ?? resolveIsDark(settings);
+  const suffix = getIconSuffix(isDark);
+  // Firefox supports `icons` for contextMenus (Chrome ignores it). Include theme-aware icons
+  // so the menu icon stays visible on dark backgrounds, mirroring the toolbar's theme_icons behavior.
+  const menuIcons = {
+    "16": `logo-16${suffix}`,
+    "48": `logo-48${suffix}`,
+  } as unknown as Record<string, string>;
+
   chrome.contextMenus.create({
     id: OPEN_KARAKEEP_ID,
     title: "Open Karakeep",
     contexts: ["action"],
+    // @ts-expect-error - `icons` is Firefox-specific, Chrome types don't include it
+    icons: menuIcons,
   });
 
   chrome.contextMenus.create({
     id: ADD_LINK_TO_KARAKEEP_ID,
     title: "Add to Karakeep",
     contexts: ["link", "page", "selection", "image"],
+    // @ts-expect-error - `icons` is Firefox-specific, Chrome types don't include it
+    icons: menuIcons,
   });
 
   if (settings?.showCountBadge) {
@@ -72,6 +128,8 @@ function registerContextMenus(settings: Settings) {
       id: VIEW_PAGE_IN_KARAKEEP,
       title: "View this page in Karakeep",
       contexts: ["action", "page"],
+      // @ts-expect-error - `icons` is Firefox-specific, Chrome types don't include it
+      icons: menuIcons,
     });
     if (settings?.useBadgeCache) {
       // Add separator
@@ -85,12 +143,16 @@ function registerContextMenus(settings: Settings) {
         id: CLEAR_CURRENT_CACHE_ID,
         title: "Clear Current Page Cache",
         contexts: ["action"],
+        // @ts-expect-error - `icons` is Firefox-specific, Chrome types don't include it
+        icons: menuIcons,
       });
 
       chrome.contextMenus.create({
         id: CLEAR_ALL_CACHE_ID,
         title: "Clear All Cache",
         contexts: ["action"],
+        // @ts-expect-error - `icons` is Firefox-specific, Chrome types don't include it
+        icons: menuIcons,
       });
     }
   }
@@ -342,9 +404,37 @@ chrome.tabs.onUpdated.addListener(async (tabId) => {
   await checkAndUpdateIcon(tabId);
 });
 
-// Listen for REFRESH_BADGE messages from popup and update badge accordingly
+// Listen for messages from popup (badge refresh + theme updates)
 chrome.runtime.onMessage.addListener(async (msg) => {
   if (msg && msg.type) {
+    if (
+      msg.type === "KARAKEEP_THEME_UPDATE" &&
+      typeof msg.isDark === "boolean"
+    ) {
+      // ThemeProvider resolved the effective theme (including system). Mirror it to
+      // action icon and context menus so the right-click menu icon inverts like the toolbar's theme_icons.
+      const isDark: boolean = msg.isDark;
+      const suffix = getIconSuffix(isDark);
+      const iconPaths = {
+        "16": `logo-16${suffix}`,
+        "48": `logo-48${suffix}`,
+        "128": `logo-128${suffix}`,
+      };
+      try {
+        await chrome.action.setIcon({ path: iconPaths });
+      } catch (e) {
+        console.warn("Failed to set action icon from theme update:", e);
+      }
+      try {
+        const settings = await getPluginSettings();
+        if (settings?.address && settings?.apiKey) {
+          registerContextMenus(settings, isDark);
+        }
+      } catch (e) {
+        console.warn("Failed to update context menus from theme update:", e);
+      }
+      return;
+    }
     if (msg.currentTab && msg.type === MessageType.BOOKMARK_REFRESH_BADGE) {
       console.log(
         "Received REFRESH_BADGE message for tab:",

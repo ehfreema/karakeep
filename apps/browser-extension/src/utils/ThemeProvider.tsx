@@ -36,6 +36,16 @@ export function ThemeProvider({ children, ...props }: ThemeProviderProps) {
         "128": `logo-128${iconSuffix}`,
       };
       chrome.action.setIcon({ path: iconPaths });
+      // Notify background to keep context-menu icons in sync (mirrors toolbar's theme_icons behavior
+      // so the right-click menu icon stays visible on dark backgrounds).
+      chrome.runtime
+        .sendMessage({
+          type: "KARAKEEP_THEME_UPDATE",
+          isDark: useDarkModeIcons,
+        })
+        .catch(() => {
+          // background may not be listening (e.g. during dev) - ignore
+        });
     };
 
     const applyThemeAndIcon = () => {
@@ -55,6 +65,28 @@ export function ThemeProvider({ children, ...props }: ThemeProviderProps) {
     };
 
     applyThemeAndIcon();
+
+    // When theme is "system", keep icons in sync if OS preference changes while popup is open.
+    if (theme === "system") {
+      const mql = window.matchMedia("(prefers-color-scheme: dark)");
+      const handler = () => applyThemeAndIcon();
+      // `addEventListener` is modern, fallback to `addListener` for older browsers
+      if (mql.addEventListener) {
+        mql.addEventListener("change", handler);
+        return () => mql.removeEventListener("change", handler);
+      } else {
+        // @ts-expect-error - deprecated but still present in some browsers
+        (
+          mql as unknown as { addListener: (cb: () => void) => void }
+        ).addListener(handler);
+        return () => {
+          // @ts-expect-error - deprecated but still present in some browsers
+          (
+            mql as unknown as { removeListener: (cb: () => void) => void }
+          ).removeListener(handler);
+        };
+      }
+    }
   }, [theme]);
 
   const value = {
