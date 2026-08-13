@@ -75,12 +75,10 @@ export function ThemeProvider({ children, ...props }: ThemeProviderProps) {
         mql.addEventListener("change", handler);
         return () => mql.removeEventListener("change", handler);
       } else {
-        // @ts-expect-error - deprecated but still present in some browsers
         (
           mql as unknown as { addListener: (cb: () => void) => void }
         ).addListener(handler);
         return () => {
-          // @ts-expect-error - deprecated but still present in some browsers
           (
             mql as unknown as { removeListener: (cb: () => void) => void }
           ).removeListener(handler);
