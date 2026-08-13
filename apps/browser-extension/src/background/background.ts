@@ -96,64 +96,129 @@ function removeContextMenus() {
  *   When provided, it is used instead of recomputing from settings, ensuring the right-click
  *   menu icon inverts exactly like the toolbar's theme_icons logic.
  */
+function isFirefoxEnvironment(): boolean {
+  try {
+    // Firefox exposes `browser` global; Chrome does not. Also check UA as fallback.
+    if (
+      typeof (globalThis as unknown as { browser?: unknown }).browser !==
+      "undefined"
+    ) {
+      return true;
+    }
+    if (
+      typeof navigator !== "undefined" &&
+      navigator.userAgent.includes("Firefox")
+    ) {
+      return true;
+    }
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
+function createContextMenu(
+  props: chrome.contextMenus.CreateProperties,
+  menuIcons?: Record<string, string>,
+) {
+  const finalProps: chrome.contextMenus.CreateProperties & {
+    icons?: Record<string, string>;
+  } = { ...props };
+  // Only Firefox supports `icons` — passing it on Chrome makes create fail and wipes the menu.
+  if (menuIcons && isFirefoxEnvironment()) {
+    finalProps.icons = menuIcons;
+  }
+  try {
+    chrome.contextMenus.create(
+      finalProps as chrome.contextMenus.CreateProperties,
+      () => {
+        if (chrome.runtime.lastError) {
+          // Fallback: retry without icons if Firefox-specific prop caused error
+          console.warn(
+            "contextMenus.create failed, retrying without icons:",
+            chrome.runtime.lastError.message,
+          );
+          const { icons: _omit, ...withoutIcons } = finalProps;
+          chrome.contextMenus.create(
+            withoutIcons as chrome.contextMenus.CreateProperties,
+          );
+        }
+      },
+    );
+  } catch (e) {
+    console.warn("contextMenus.create threw, retrying without icons:", e);
+    const { icons: _omit, ...withoutIcons } = finalProps;
+    chrome.contextMenus.create(
+      withoutIcons as chrome.contextMenus.CreateProperties,
+    );
+  }
+}
+
 function registerContextMenus(settings: Settings, overrideIsDark?: boolean) {
   removeContextMenus();
   const isDark = overrideIsDark ?? resolveIsDark(settings);
   const suffix = getIconSuffix(isDark);
-  // Firefox supports `icons` for contextMenus (Chrome ignores it). Include theme-aware icons
-  // so the menu icon stays visible on dark backgrounds, mirroring the toolbar's theme_icons behavior.
-  const menuIcons = {
-    "16": `logo-16${suffix}`,
-    "48": `logo-48${suffix}`,
-  } as unknown as Record<string, string>;
+  // Firefox supports `icons` for contextMenus (Chrome fails if present). Provide theme-aware
+  // icons only there so the menu icon stays visible on dark backgrounds, mirroring toolbar theme_icons.
+  const menuIcons: Record<string, string> | undefined = isFirefoxEnvironment()
+    ? {
+        "16": `logo-16${suffix}`,
+        "48": `logo-48${suffix}`,
+      }
+    : undefined;
 
-  chrome.contextMenus.create({
-    id: OPEN_KARAKEEP_ID,
-    title: "Open Karakeep",
-    contexts: ["action"],
-    // @ts-expect-error - `icons` is Firefox-specific, Chrome types don't include it
-    icons: menuIcons,
-  });
+  createContextMenu(
+    {
+      id: OPEN_KARAKEEP_ID,
+      title: "Open Karakeep",
+      contexts: ["action"],
+    },
+    menuIcons,
+  );
 
-  chrome.contextMenus.create({
-    id: ADD_LINK_TO_KARAKEEP_ID,
-    title: "Add to Karakeep",
-    contexts: ["link", "page", "selection", "image"],
-    // @ts-expect-error - `icons` is Firefox-specific, Chrome types don't include it
-    icons: menuIcons,
-  });
+  createContextMenu(
+    {
+      id: ADD_LINK_TO_KARAKEEP_ID,
+      title: "Add to Karakeep",
+      contexts: ["link", "page", "selection", "image"],
+    },
+    menuIcons,
+  );
 
   if (settings?.showCountBadge) {
-    chrome.contextMenus.create({
-      id: VIEW_PAGE_IN_KARAKEEP,
-      title: "View this page in Karakeep",
-      contexts: ["action", "page"],
-      // @ts-expect-error - `icons` is Firefox-specific, Chrome types don't include it
-      icons: menuIcons,
-    });
+    createContextMenu(
+      {
+        id: VIEW_PAGE_IN_KARAKEEP,
+        title: "View this page in Karakeep",
+        contexts: ["action", "page"],
+      },
+      menuIcons,
+    );
     if (settings?.useBadgeCache) {
       // Add separator
-      chrome.contextMenus.create({
+      createContextMenu({
         id: SEPARATOR_ID,
         type: "separator",
         contexts: ["action"],
       });
 
-      chrome.contextMenus.create({
-        id: CLEAR_CURRENT_CACHE_ID,
-        title: "Clear Current Page Cache",
-        contexts: ["action"],
-        // @ts-expect-error - `icons` is Firefox-specific, Chrome types don't include it
-        icons: menuIcons,
-      });
+      createContextMenu(
+        {
+          id: CLEAR_CURRENT_CACHE_ID,
+          title: "Clear Current Page Cache",
+          contexts: ["action"],
+        },
+        menuIcons,
+      );
 
-      chrome.contextMenus.create({
-        id: CLEAR_ALL_CACHE_ID,
-        title: "Clear All Cache",
-        contexts: ["action"],
-        // @ts-expect-error - `icons` is Firefox-specific, Chrome types don't include it
-        icons: menuIcons,
-      });
+      createContextMenu(
+        {
+          id: CLEAR_ALL_CACHE_ID,
+          title: "Clear All Cache",
+          contexts: ["action"],
+        },
+        menuIcons,
+      );
     }
   }
 }
